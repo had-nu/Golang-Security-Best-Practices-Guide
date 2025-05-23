@@ -159,5 +159,169 @@ func (u *User) Sanitize() {
     u.Username = strings.TrimSpace(u.Username)
 }
 ```
+### Use Case 3: SQL Injection Prevention
+
+```go
+// internal/handlers/user.go
+package handlers
+
+import (
+    "database/sql"
+    "encoding/json"
+    "net/http"
+    "strconv"
+    
+    "myapp/internal/models"
+    "github.com/gorilla/mux"
+)
+
+type UserHandler struct {
+    db *sql.DB
+}
+
+func NewUserHandler(db *sql.DB) *UserHandler {
+    return &UserHandler{db: db}
+}
+
+func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
+    vars := mux.Vars(r)
+    userIDStr := vars["id"]
+    
+    // Validate input
+    userID, err := strconv.ParseInt(userIDStr, 10, 64)
+    if err != nil {
+        http.Error(w, "Invalid user ID", http.StatusBadRequest)
+        return
+    }
+    
+    // Use parameterized queries to prevent SQL injection
+    query := "SELECT id, email, username FROM users WHERE id = $1"
+    var user models.User
+    
+    err = h.db.QueryRow(query, userID).Scan(&user.ID, &user.Email, &user.Username)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            http.Error(w, "User not found", http.StatusNotFound)
+            return
+        }
+        http.Error(w, "Internal server error", http.StatusInternalServerError)
+        return
+    }
+    
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(user)
+}
+
+func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
+    var user models.User
+    
+    if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+        http.Error(w, "Invalid JSON", http.StatusBadRequest)
+        return
+    }
+    
+    // Sanitize and validate
+    user.Sanitize()
+    if err := user.Validate(); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+    
+    // Hash password before storing
+    hashedPassword, err := hashPassword(user.Password)
+    if err != nil {
+        http.Error(w, "Internal server error", http.StatusInternalServerError)
+        return
+    }
+    
+    // Use parameterized query
+    query := `INSERT INTO users (email, username, password_hash) VALUES ($1, $2, $3) RETURNING id`
+    err = h.db.QueryRow(query, user.Email, user.Username, hashedPassword).Scan(&user.ID)
+    if err != nil {
+        http.Error(w, "Failed to create user", http.StatusInternalServerError)
+        return
+    }
+    
+    user.Password = "" // Clear password from response
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(user)
+}
+```
+
+## Authentication and Authorization
+
+### Use Case 4: JWT Authentication
+
+```go
+// internal/auth/jwt.go
+package auth
+
+import (
+    "errors"
+    "time"
+    
+    "github.com/golang-jwt/jwt/v5"
+)
+
+var (
+    ErrInvalidToken = errors.New("invalid token")
+    ErrTokenExpired = errors.New("token expired")
+)
+
+type Claims struct {
+    UserID int64  `json:"user_id"`
+    Role   string `json:"role"`
+    jwt.RegisteredClaims
+}
+
+type JWTManager struct {
+    secretKey     []byte
+    tokenDuration time.Duration
+}
+
+func NewJWTManager(secretKey string, tokenDuration time.Duration) *JWTManager {
+    return &JWTManager{
+        secretKey:     []byte(secretKey),
+        tokenDuration: tokenDuration,
+    }
+}
+
+func (manager *JWTManager) Generate(userID int64, role string) (string, error) {
+    claims := Claims{
+        UserID: userID,
+        Role:   role,
+        RegisteredClaims: jwt.RegisteredClaims{
+            ExpiresAt: jwt.NewNumericDate(time.Now().Add(manager.tokenDuration)),
+            IssuedAt:  jwt.NewNumericDate(time.Now()),
+            Issuer:    "myapp",
+        },
+    }
+    
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+    return token.SignedString(manager.secretKey)
+}
+
+func (manager *JWTManager) Verify(tokenString string) (*Claims, error) {
+    token, err := jwt.ParseWithClaims(
+        tokenString,
+        &Claims{},
+        func(token *jwt.Token) (interface{}, error) {
+            return manager.secretKey, nil
+        },
+    )
+    
+    if err != nil {
+        return nil, ErrInvalidToken
+    }
+    
+    claims, ok := token.Claims.(*Claims)
+    if !ok || !token.Valid {
+        return nil, ErrInvalidToken
+    }
+    
+    return claims, nil
+}
+```
 
 
