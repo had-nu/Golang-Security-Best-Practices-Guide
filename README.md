@@ -104,3 +104,60 @@ func main() {
     }
 }
 ```
+## Input Validation and Sanitization
+
+### Use Case 2: Request Validation
+
+```go
+// internal/models/user.go
+package models
+
+import (
+    "errors"
+    "net/mail"
+    "regexp"
+    "strings"
+    "unicode/utf8"
+)
+
+type User struct {
+    ID       int64  `json:"id"`
+    Email    string `json:"email"`
+    Username string `json:"username"`
+    Password string `json:"-"` // Never expose in JSON
+}
+
+var (
+    usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9_]{3,20}$`)
+    
+    ErrInvalidEmail    = errors.New("invalid email format")
+    ErrInvalidUsername = errors.New("username must be 3-20 characters, alphanumeric and underscore only")
+    ErrPasswordTooWeak = errors.New("password must be at least 8 characters")
+)
+
+func (u *User) Validate() error {
+    // Email validation
+    if _, err := mail.ParseAddress(u.Email); err != nil {
+        return ErrInvalidEmail
+    }
+    
+    // Username validation
+    if !usernameRegex.MatchString(u.Username) {
+        return ErrInvalidUsername
+    }
+    
+    // Password validation
+    if utf8.RuneCountInString(u.Password) < 8 {
+        return ErrPasswordTooWeak
+    }
+    
+    return nil
+}
+
+func (u *User) Sanitize() {
+    u.Email = strings.TrimSpace(strings.ToLower(u.Email))
+    u.Username = strings.TrimSpace(u.Username)
+}
+```
+
+
