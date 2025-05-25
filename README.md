@@ -324,4 +324,198 @@ func (manager *JWTManager) Verify(tokenString string) (*Claims, error) {
 }
 ```
 
+### Use Case 5: Authentication Middleware
+
+```go
+// internal/middleware/auth.go
+package middleware
+
+import (
+    "context"
+    "net/http"
+    "strings"
+    
+    "myapp/internal/auth"
+)
+
+type contextKey string
+
+const UserContextKey contextKey = "user"
+
+func AuthMiddleware(jwtManager *auth.JWTManager) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            authHeader := r.Header.Get("Authorization")
+            if authHeader == "" {
+                http.Error(w, "Authorization header required", http.StatusUnauthorized)
+                return
+            }
+            
+            // Expected format: "Bearer <token>"
+            parts := strings.Split(authHeader, " ")
+            if len(parts) != 2 || parts[0] != "Bearer" {
+                http.Error(w, "Invalid authorization header format", http.StatusUnauthorized)
+                return
+            }
+            
+            claims, err := jwtManager.Verify(parts[1])
+            if err != nil {
+                http.Error(w, "Invalid token", http.StatusUnauthorized)
+                return
+            }
+            
+            // Add user info to context
+            ctx := context.WithValue(r.Context(), UserContextKey, claims)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
+}
+
+func RequireRole(role string) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            claims, ok := r.Context().Value(UserContextKey).(*auth.Claims)
+            if !ok {
+                http.Error(w, "Unauthorized", http.StatusUnauthorized)
+                return
+            }
+            
+            if claims.Role != role {
+                http.Error(w, "Forbidden", http.StatusForbidden)
+                return
+            }
+            
+            next.ServeHTTP(w, r)
+        })
+    }
+}
+```
+
+## Database Security
+
+### Use Case 6: Database Connection with Security
+
+```go
+// internal/database/connection.go
+package database
+
+import (
+    "database/sql"
+    "fmt"
+    "time"
+    
+    _ "github.com/lib/pq"
+)
+
+type Config struct {
+    Host     string
+    Port     int
+    User     string
+    Password string
+    DBName   string
+    SSLMode  string
+}
+
+func Connect(cfg Config) (*sql.DB, error) {
+    // Build connection string with SSL
+    dsn := fmt.Sprintf(
+        "host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+        cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName, cfg.SSLMode,
+    )
+    
+    db, err := sql.Open("postgres", dsn)
+    if err != nil {
+        return nil, fmt.Errorf("failed to open database: %w", err)
+    }
+    
+    // Configure connection pool
+    db.SetMaxOpenConns(25)
+    db.SetMaxIdleConns(5)
+    db.SetConnMaxLifetime(5 * time.Minute)
+    db.SetConnMaxIdleTime(1 * time.Minute)
+    
+    // Test connection
+    if err := db.Ping(); err != nil {
+        return nil, fmt.Errorf("failed to ping database: %w", err)
+    }
+    
+    return db, nil
+}
+```
+
+### Use Case 7: Secure Database Transactions
+
+```go
+// internal/repository/user.go
+package repository
+
+import (
+    "database/sql"
+    "fmt"
+    
+    "myapp/internal/models"
+)
+
+type UserRepository struct {
+    db *sql.DB
+}
+
+func NewUserRepository(db *sql.DB) *UserRepository {
+    return &UserRepository{db: db}
+}
+
+func (r *UserRepository) CreateUserWithProfile(user *models.User, profile *models.Profile) error {
+    // Use transaction for data consistency
+    tx, err := r.db.Begin()
+    if err != nil {
+        return fmt.Errorf("failed to begin transaction: %w", err)
+    }
+    
+    defer func() {
+        if err != nil {
+            tx.Rollback()
+        }
+    }()
+    
+    // Insert user
+    userQuery := `INSERT INTO users (email, username, password_hash) VALUES ($1, $2, $3) RETURNING id`
+    err = tx.QueryRow(userQuery, user.Email, user.Username, user.Password).Scan(&user.ID)
+    if err != nil {
+        return fmt.Errorf("failed to create user: %w", err)
+    }
+    
+    // Insert profile
+    profileQuery := `INSERT INTO profiles (user_id, first_name, last_name) VALUES ($1, $2, $3)`
+    _, err = tx.Exec(profileQuery, user.ID, profile.FirstName, profile.LastName)
+    if err != nil {
+        return fmt.Errorf("failed to create profile: %w", err)
+    }
+    
+    if err = tx.Commit(); err != nil {
+        return fmt.Errorf("failed to commit transaction: %w", err)
+    }
+    
+    return nil
+}
+
+func (r *UserRepository) GetUserByEmail(email string) (*models.User, error) {
+    query := `SELECT id, email, username, password_hash FROM users WHERE email = $1`
+    
+    var user models.User
+    err := r.db.QueryRow(query, email).Scan(
+        &user.ID, &user.Email, &user.Username, &user.Password,
+    )
+    
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return nil, nil
+        }
+        return nil, fmt.Errorf("failed to get user: %w", err)
+    }
+    
+    return &user, nil
+}
+```
+
+
 
